@@ -156,7 +156,18 @@ def set_risk():
 @app.post("/api/start")
 def start():
  with LOCK:
-  state["running"]=True; state["last_action"]="Robô iniciado em SIMULAÇÃO, sem ordens reais."; save(); return jsonify({"ok":True})
+  state["running"]=True
+  # Open one immediate PAPER entry when a usable quote is already available.
+  price=state.get("last_price")
+  if state.get("asset",0)<=0 and price and price>0 and state.get("cash",0)>=state.get("trade_amount",10):
+   margin=min(state.get("trade_amount",10),state["cash"])
+   qty=(margin*state.get("leverage",1))/price
+   state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin
+   state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Entrada inicial de teste ao iniciar","candle":"15s"})
+   state["last_action"]=f"COMPRA SIMULADA INICIAL · {state.get('leverage',1)}x"
+  else:
+   state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando primeira cotação para entrada inicial."
+  save(); return jsonify({"ok":True,"paper_only":True})
 @app.post("/api/stop")
 def stop():
  with LOCK:
