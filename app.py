@@ -54,6 +54,12 @@ def worker():
    try:
     price=getprice(); state["prices"]=(state["prices"]+[price])[-100:]
     state["last_price"]=price; state["last_update"]=now(); ps=state["prices"]
+    # Open a small starter position on the first quote so unrealized P&L
+    # visibly follows market movement immediately in paper mode.
+    if not state["trades"] and state["asset"]==0 and state["cash"]>10:
+     amount=state["cash"]*.10; qty=amount/price; state["cash"]-=amount; state["asset"]=qty; state["avg_price"]=price
+     state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":amount,"reason":"Entrada inicial de demonstração"})
+     state["last_action"]=f"COMPRA SIMULADA INICIAL · {qty:.6f} {SYMBOL.split('/')[0]}"
     if len(ps)>=21:
      fast,slow=avg(ps[-9:]),avg(ps[-21:])
      if fast>slow and state["asset"]==0 and state["cash"]>10:
