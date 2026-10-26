@@ -7,7 +7,7 @@ INITIAL=float(os.getenv("INITIAL_CASH","100")); SYMBOL=os.getenv("SYMBOL","BTC/U
 LOCK=threading.RLock()
 def now(): return datetime.now(timezone.utc).isoformat()
 def fresh():
- return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"leverage":1,"trade_amount":10.0,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
+ return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"position_side":None,"leverage":1,"trade_amount":10.0,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
 def save():
  os.makedirs(os.path.dirname(STATE_FILE) or ".",exist_ok=True)
  with open(STATE_FILE+".tmp","w") as f: json.dump(state,f)
@@ -59,32 +59,37 @@ def worker():
     if candle is None:
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
-     state["signal_status"]="Montando a primeira vela de 1 minuto"
+     state["signal_status"]="Montando a vela atual de 1 minuto"
     elif bucket == state.get("last_candle_bucket"):
      candle["high"]=max(candle["high"],price); candle["low"]=min(candle["low"],price); candle["close"]=price
      state["current_candle"]=candle
     else:
      closed=dict(candle); closed["close"]=price; closed["closed_at"]=now()
      state["candles"]=(state.get("candles",[])+[closed])[-100:]
+     # Always close the previous one-minute position at the candle boundary.
+     side=state.get("position_side","LONG")
      if state.get("asset",0)>0:
-      qty=state["asset"]; pnl=(price-state["avg_price"])*qty; margin=max(state.get("position_margin",0.0),0.01)
-      state["cash"]+=max(0.0,margin+pnl); state["asset"]=0.0; state["position_margin"]=0.0; state["realized_pnl"]+=pnl
-      state["trades"].append({"time":now(),"side":"SELL","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":"Fechamento no fim da vela de 1 minuto","candle":"1m"})
-      state["last_action"]=f"VENDA SIMULADA · fim da vela 1m · P&L {pnl:+.2f} USD"
+      qty=state["asset"]; direction=1 if side=="LONG" else -1
+      pnl=(price-state["avg_price"])*qty*direction; margin=max(state.get("position_margin",0.0),0.01)
+      state["cash"]+=max(0.0,margin+pnl); state["asset"]=0.0; state["position_margin"]=0.0; state["position_side"]=None; state["realized_pnl"]+=pnl
+      state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":"Fechamento obrigatório no fim da vela de 1 minuto","candle":"1m","position_side":side})
+      state["last_action"]=f"FECHAMENTO SIMULADO {side} · fim da vela 1m · P&L {pnl:+.2f} USD"
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
-     cs=state.get("candles",[]); bullish_signal=False
-     if len(cs)>=2:
-      prev=cs[-1]; before=cs[-2]
-      bullish_signal=(prev["close"]>prev["open"] and prev["close"]>before["close"])
-     if state.get("asset",0)<=0 and bullish_signal and state.get("cash",0)>=state.get("trade_amount",10):
+     cs=state.get("candles",[]); direction=None
+     if cs:
+      prev=cs[-1]
+      if prev["close"]>prev["open"]: direction="LONG"
+      elif prev["close"]<prev["open"]: direction="SHORT"
+     # One position per minute: follow the direction of the just-closed candle.
+     if state.get("asset",0)<=0 and direction and state.get("cash",0)>=state.get("trade_amount",10):
       margin=min(state.get("trade_amount",10),state["cash"]); qty=(margin*state.get("leverage",1))/price
-      state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin
-      state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Sinal de alta confirmado pela vela anterior","candle":"1m"})
-      state["last_action"]="COMPRA SIMULADA · sinal da vela 1m · fechará no próximo fechamento"
-      state["signal_status"]="Uma posição aberta para esta vela de 1 minuto"
+      state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin; state["position_side"]=direction
+      state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Direção da vela de 1 minuto anterior","candle":"1m","position_side":direction})
+      state["last_action"]=f"ENTRADA SIMULADA {direction} · ciclo de 1 minuto"
+      state["signal_status"]="Uma única posição; fechamento na próxima virada do minuto"
      else:
-      state["signal_status"]="Vela de 1m fechada; aguardando confirmação de alta"
+      state["signal_status"]="Vela neutra ou sem margem disponível; aguardando próxima vela"
     save()
    except Exception as e:
     state["last_update"]=now(); state["errors"]=(state.get("errors",[])+[str(e)])[-5:]; state["last_action"]="Erro na cotação; veja a mensagem abaixo"; state["signal_status"]="Erro ao atualizar preço"; save()
@@ -105,7 +110,7 @@ async function setLeverage(v){postSettings("/api/leverage",{leverage:Number(v)})
 async function setTradeAmount(v){postSettings("/api/amount",{amount:Number(v)})}
 async function setRisk(){postSettings("/api/risk",{take_profit_pct:Number(document.getElementById("tp").value),stop_loss_pct:Number(document.getElementById("sl").value)})}
 const money=n=>Number(n||0).toLocaleString('en-US',{style:'currency',currency:'USD'});
-async function refresh(){try{let r=await fetch('/api/state'),s=await r.json();let equity=s.cash+s.position_margin+s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0));document.getElementById("leverage").value=String(s.leverage||1);document.getElementById("tradeAmount").value=String(s.trade_amount||10);document.getElementById("tp").value=String(s.take_profit_pct||3);document.getElementById("sl").value=String(s.stop_loss_pct||2);document.getElementById('equity').textContent=money(equity);document.getElementById('initial').textContent=money(s.initial_cash);document.getElementById('price').textContent=s.last_price?money(s.last_price):'Aguardando';let pnl=equity-s.initial_cash,p=document.getElementById('pnl');p.textContent=(pnl>=0?'+':'')+money(pnl);p.style.color=pnl>=0?'#6ce5b1':'#ff8d9a';document.getElementById('run').textContent=s.running?'Rodando':'Parado';document.getElementById('position').textContent=money(s.asset*(s.last_price||s.avg_price||0));let upnl=s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0));let u=document.getElementById('unrealized');u.textContent=(upnl>=0?'+':'')+money(upnl);u.style.color=upnl>=0?'#6ce5b1':'#ff8d9a';let vals=s.prices||[];let line=document.querySelector('#chart polyline');if(vals.length>1){let lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1;line.setAttribute('points',vals.map((v,i)=>`${i*600/(vals.length-1)},${140-((v-lo)/span)*125}`).join(' '))}document.getElementById('action').textContent=s.last_action;document.getElementById('updated').textContent='Atualização: '+(s.last_update||'—')+' · '+s.symbol;document.getElementById('err').textContent=(s.errors||[]).slice(-1)[0]||'';let rows=(s.trades||[]).slice().reverse().slice(0,20);document.getElementById('trades').innerHTML=rows.length?rows.map(t=>`<div class="trade"><b class="${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'COMPRA':'VENDA'}</b><span>${new Date(t.time).toLocaleString()}</span><span>${money(t.price)}</span><span>Qtd. ${Number(t.qty).toFixed(6)}</span><span>${money(t.notional)}</span><span>${t.pnl===undefined?'':'P&L '+money(t.pnl)}</span></div>`).join(''):'Nenhuma operação ainda.'}catch(e){}}
+async function refresh(){try{let r=await fetch('/api/state'),s=await r.json();let equity=s.cash+s.position_margin+s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);document.getElementById("leverage").value=String(s.leverage||1);document.getElementById("tradeAmount").value=String(s.trade_amount||10);document.getElementById("tp").value=String(s.take_profit_pct||3);document.getElementById("sl").value=String(s.stop_loss_pct||2);document.getElementById('equity').textContent=money(equity);document.getElementById('initial').textContent=money(s.initial_cash);document.getElementById('price').textContent=s.last_price?money(s.last_price):'Aguardando';let pnl=equity-s.initial_cash,p=document.getElementById('pnl');p.textContent=(pnl>=0?'+':'')+money(pnl);p.style.color=pnl>=0?'#6ce5b1':'#ff8d9a';document.getElementById('run').textContent=s.running?'Rodando':'Parado';document.getElementById('position').textContent=money(s.asset*(s.last_price||s.avg_price||0));let upnl=s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);let u=document.getElementById('unrealized');u.textContent=(upnl>=0?'+':'')+money(upnl);u.style.color=upnl>=0?'#6ce5b1':'#ff8d9a';let vals=s.prices||[];let line=document.querySelector('#chart polyline');if(vals.length>1){let lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1;line.setAttribute('points',vals.map((v,i)=>`${i*600/(vals.length-1)},${140-((v-lo)/span)*125}`).join(' '))}document.getElementById('action').textContent=s.last_action;document.getElementById('updated').textContent='Atualização: '+(s.last_update||'—')+' · '+s.symbol;document.getElementById('err').textContent=(s.errors||[]).slice(-1)[0]||'';let rows=(s.trades||[]).slice().reverse().slice(0,20);document.getElementById('trades').innerHTML=rows.length?rows.map(t=>`<div class="trade"><b class="${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'COMPRA':'VENDA'}</b><span>${new Date(t.time).toLocaleString()}</span><span>${money(t.price)}</span><span>Qtd. ${Number(t.qty).toFixed(6)}</span><span>${money(t.notional)}</span><span>${t.pnl===undefined?'':'P&L '+money(t.pnl)}</span></div>`).join(''):'Nenhuma operação ainda.'}catch(e){}}
 async function act(a){let r=await fetch('/api/'+a,{method:'POST'}),j=await r.json();if(!r.ok)alert(j.error||'Erro');refresh()}setInterval(refresh,5000);refresh();
 </script></body></html>
 """
@@ -116,7 +121,7 @@ def health(): return jsonify({"ok":True,"paper_only":True})
 @app.get("/api/state")
 def api_state():
  with LOCK:
-  s=dict(state); s["equity"]=s["cash"]+s.get("position_margin",0)+s["asset"]*((s["last_price"] or s["avg_price"] or 0)-(s["avg_price"] or 0)); return jsonify(s)
+  s=dict(state); s["equity"]=s["cash"]+s.get("position_margin",0)+s["asset"]*((s["last_price"] or s["avg_price"] or 0)-(s["avg_price"] or 0))*(1 if s.get("position_side","LONG")=="LONG" else -1); return jsonify(s)
 @app.post("/api/leverage")
 def set_leverage():
  from flask import request
