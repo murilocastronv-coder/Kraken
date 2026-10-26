@@ -1,4 +1,4 @@
-import json, os, threading, time, urllib.request, urllib.parse
+import json, os, threading, time, subprocess
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 app = Flask(__name__)
@@ -18,19 +18,32 @@ def load():
    s=fresh(); s.update(json.load(f)); return s
  except Exception: return fresh()
 state=load()
+def findprice(x):
+ if isinstance(x,dict):
+  for k in ("last_price","last","price","c"):
+   v=x.get(k)
+   try:
+    if isinstance(v,list): v=v[0]
+    if float(v)>0:return float(v)
+   except Exception:pass
+  for v in x.values():
+   p=findprice(v)
+   if p:return p
+ elif isinstance(x,list):
+  for v in x:
+   p=findprice(v)
+   if p:return p
+ return None
 def getprice():
- # Public Kraken ticker endpoint; no API key and no trading endpoints.
- pair = "XBTUSD" if SYMBOL.replace(" ","").upper() in ("BTC/USD","BTCUSD","XBT/USD","XBTUSD") else SYMBOL.replace("/","")
- url = "https://api.kraken.com/0/public/Ticker?pair=" + urllib.parse.quote(pair)
- req = urllib.request.Request(url, headers={"User-Agent":"KrakenPaperTrader/1.0"})
- with urllib.request.urlopen(req, timeout=15) as response:
-  data=json.loads(response.read().decode("utf-8"))
- if data.get("error"): raise RuntimeError("Kraken ticker: " + ", ".join(data["error"]))
- result=data.get("result",{})
- if not result: raise RuntimeError("Kraken não retornou cotação para " + pair)
- ticker=next(iter(result.values()))
- price=float(ticker["c"][0])
- if price<=0: raise RuntimeError("Preço inválido recebido da Kraken")
+ # Uses the installed official Kraken CLI, public market data only.
+ pair = "BTCUSD" if SYMBOL.replace(" ","").upper() in ("BTC/USD","BTCUSD","XBT/USD","XBTUSD") else SYMBOL.replace("/","")
+ proc=subprocess.run(["kraken","ticker",pair,"-o","json"],capture_output=True,text=True,timeout=20)
+ if proc.returncode != 0:
+  raise RuntimeError("Kraken CLI: " + (proc.stderr or proc.stdout or "falha ao consultar ticker")[-400:])
+ try: data=json.loads(proc.stdout)
+ except Exception as e: raise RuntimeError("Resposta JSON inválida do Kraken CLI: "+str(e))
+ price=findprice(data)
+ if not price: raise RuntimeError("Não consegui interpretar a cotação do Kraken CLI.")
  return price
 def avg(a): return sum(a)/len(a) if a else 0
 def worker():
