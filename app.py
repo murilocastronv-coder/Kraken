@@ -7,7 +7,7 @@ INITIAL=float(os.getenv("INITIAL_CASH","100")); SYMBOL=os.getenv("SYMBOL","BTC/U
 LOCK=threading.RLock()
 def now(): return datetime.now(timezone.utc).isoformat()
 def fresh():
- return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"position_side":None,"leverage":1,"trade_amount":10.0,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
+ return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"position_side":None,"entry_fee":0.0,"fees_paid":0.0,"fee_rate":0.008,"leverage":1,"trade_amount":10.0,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
 def save():
  os.makedirs(os.path.dirname(STATE_FILE) or ".",exist_ok=True)
  with open(STATE_FILE+".tmp","w") as f: json.dump(state,f)
@@ -71,8 +71,9 @@ def worker():
      if state.get("asset",0)>0:
       qty=state["asset"]; direction=1 if side=="LONG" else -1
       pnl=(price-state["avg_price"])*qty*direction; margin=max(state.get("position_margin",0.0),0.01)
-      state["cash"]+=max(0.0,margin+pnl); state["asset"]=0.0; state["position_margin"]=0.0; state["position_side"]=None; state["realized_pnl"]+=pnl
-      state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":"Fechamento obrigatório no fim da vela de 1 minuto","candle":"1m","position_side":side})
+      exit_fee=qty*price*state.get("fee_rate",0.008); entry_fee=state.get("entry_fee",0.0); fees=entry_fee+exit_fee; net_pnl=pnl-fees
+      state["cash"]+=max(0.0,margin+pnl-exit_fee); state["asset"]=0.0; state["position_margin"]=0.0; state["position_side"]=None; state["entry_fee"]=0.0; state["realized_pnl"]+=net_pnl; state["fees_paid"]=state.get("fees_paid",0.0)+exit_fee
+      state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"gross_pnl":pnl,"fee_entry":entry_fee,"fee_exit":exit_fee,"fees":fees,"pnl":net_pnl,"reason":"Fechamento na virada da vela 1m com comissão simulada","candle":"1m","position_side":side})
       state["last_action"]=f"FECHAMENTO SIMULADO {side} · fim da vela 1m · P&L {pnl:+.2f} USD"
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
@@ -84,8 +85,11 @@ def worker():
      # One position per minute: follow the direction of the just-closed candle.
      if state.get("asset",0)<=0 and direction and state.get("cash",0)>=state.get("trade_amount",10):
       margin=min(state.get("trade_amount",10),state["cash"]); qty=(margin*state.get("leverage",1))/price
-      state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin; state["position_side"]=direction
-      state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Direção da vela de 1 minuto anterior","candle":"1m","position_side":direction})
+      entry_fee=qty*price*state.get("fee_rate",0.008)
+      if margin+entry_fee>state["cash"]:
+       margin=max(0.0,state["cash"]/(1+state.get("leverage",1)*state.get("fee_rate",0.008))); qty=(margin*state.get("leverage",1))/price; entry_fee=qty*price*state.get("fee_rate",0.008)
+      state["cash"]-=margin+entry_fee; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin; state["position_side"]=direction; state["entry_fee"]=entry_fee; state["fees_paid"]=state.get("fees_paid",0.0)+entry_fee
+      state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"fee_entry":entry_fee,"fees":entry_fee,"pnl":-entry_fee,"reason":"Direção da vela 1m anterior; comissão simulada","candle":"1m","position_side":direction})
       state["last_action"]=f"ENTRADA SIMULADA {direction} · ciclo de 1 minuto"
       state["signal_status"]="Uma única posição; fechamento na próxima virada do minuto"
      else:
@@ -103,7 +107,7 @@ PAGE = r"""
 <div class="card"><div class="label">Valor por operação em USD (margem)</div><input id="tradeAmount" type="number" min="1" max="100" step="0.01" value="10" inputmode="decimal" onchange="setTradeAmount(this.value)" style="margin-top:8px;padding:12px;border-radius:10px;background:#29263a;color:#fff;border:1px solid #48415f;width:100%;font-size:16px"><div class="label" style="margin-top:12px">Take Profit (% da margem)</div><input id="tp" type="number" min="0.5" max="50" step="0.5" value="3" onchange="setRisk()" style="padding:10px;background:#29263a;color:#fff;width:100%"><div class="label" style="margin-top:12px">Stop Loss (% da margem)</div><input id="sl" type="number" min="0.5" max="50" step="0.5" value="2" onchange="setRisk()" style="padding:10px;background:#29263a;color:#fff;width:100%"><div class="label" style="margin-top:12px">Alavancagem (leverage) — apenas simulação</div><select id="leverage" onchange="setLeverage(this.value)" style="margin-top:8px;padding:12px;border-radius:10px;background:#29263a;color:#fff;border:1px solid #48415f;width:100%;font-size:16px"><option value="1">1x · Sem alavancagem</option><option value="2">2x</option><option value="3">3x</option><option value="5">5x</option><option value="10">10x</option><option value="15">15x</option><option value="20">20x · máximo simulado BTC/USD</option></select><div class="sub">BTC/USD em margem na Kraken pode chegar a 20x para contas elegíveis; esta aplicação simula até 20x e não envia ordens reais. Alavancagem amplia perdas e ganhos.</div></div><div class="buttons"><button class="btn" onclick="act('start')">Iniciar robô demo</button><button class="btn stop" onclick="act('stop')">Parar robô</button><button class="btn stop" onclick="act('reset')">Reiniciar saldo demo</button></div>
 <div class="card"><div class="label">Última ação</div><div class="val" style="font-size:16px" id="action">Carregando…</div><div class="sub" id="updated"></div><div class="error" id="err"></div></div>
 <div class="section">Posição aberta e evolução</div><div class="grid"><div class="card"><div class="label">Valor da posição</div><div class="val" id="position">—</div></div><div class="card"><div class="label">Lucro/prejuízo não realizado</div><div class="val" id="unrealized">—</div></div></div><div class="card"><div class="label">Gráfico de preço recente</div><svg id="chart" viewBox="0 0 600 150" style="width:100%;height:auto;margin-top:12px" role="img" aria-label="Gráfico do preço recente"><polyline points="" fill="none" stroke="#8b6cff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><div class="sub">Amostras recebidas enquanto o robô está ligado.</div></div><div class="section">Histórico de ordens simuladas</div><div class="card" id="trades">Nenhuma ordem ainda.</div>
-<div class="foot">O app consulta apenas cotações públicas e simula compras/vendas dentro do servidor. Não usa API Key e não envia ordens reais. Estratégia didática, sem garantia de lucro. Primeiro sinal após 21 amostras de preço.</div></main>
+<div class="foot">O app consulta apenas cotações públicas e simula compras/vendas dentro do servidor. Não usa API Key e não envia ordens reais. Comissão taker simulada: 0,80% na entrada e 0,80% na saída (taxa de referência, a taxa real varia por produto e nível). O P&L realizado desconta as comissões. Sem garantia de lucro.</div></main>
 <script>
 async function postSettings(path,data){let r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});let j=await r.json();if(!r.ok)alert(j.error||"Erro ao atualizar");refresh()}
 async function setLeverage(v){postSettings("/api/leverage",{leverage:Number(v)})}
