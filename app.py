@@ -48,56 +48,46 @@ def getprice():
 def avg(a): return sum(a)/len(a) if a else 0
 def worker():
  while True:
-  time.sleep(15)
+  time.sleep(5)
   with LOCK:
    if not state["running"]: continue
    try:
-    price=getprice(); state["last_price"]=price; state["last_update"]=now()
+    price=getprice(); bucket=int(time.time()//60)
+    state["last_price"]=price; state["last_update"]=now()
     state["prices"]=(state.get("prices",[])+[price])[-300:]
-    bucket=int(time.time()//15); candle=state.get("current_candle")
+    candle=state.get("current_candle")
     if candle is None:
-     state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price}
+     state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
-    elif bucket==state.get("last_candle_bucket"):
+     state["signal_status"]="Montando a primeira vela de 1 minuto"
+    elif bucket == state.get("last_candle_bucket"):
      candle["high"]=max(candle["high"],price); candle["low"]=min(candle["low"],price); candle["close"]=price
      state["current_candle"]=candle
     else:
-     closed=dict(candle); closed["close"]=price
+     closed=dict(candle); closed["close"]=price; closed["closed_at"]=now()
      state["candles"]=(state.get("candles",[])+[closed])[-100:]
-     state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price}
-     state["last_candle_bucket"]=bucket
-     cs=state["candles"]
-     if len(cs)>=3:
-      x,y,z=cs[-3],cs[-2],cs[-1]
-      bullish=z["close"]>z["open"]; bearish=z["close"]<z["open"]
-      breakout=bullish and z["close"]>y["high"]
-      rising=x["close"]<y["close"]<z["close"]
-      breakdown=bearish and z["close"]<y["low"]
-      if state["asset"]>0:
-       qty=state["asset"]; pnl=(price-state["avg_price"])*qty
-       margin=max(state.get("position_margin",0.0),0.01); pct=pnl/margin*100
-       reason="Take Profit" if pct>=state.get("take_profit_pct",3.0) else ("Stop Loss" if pct<=-state.get("stop_loss_pct",2.0) else ("Reversão de vela" if breakdown else None))
-       if reason:
-        state["cash"]+=max(0.0,margin+pnl); state["asset"]=0.0; state["position_margin"]=0.0; state["realized_pnl"]+=pnl
-        state["trades"].append({"time":now(),"side":"SELL","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":reason,"candle":"15s"})
-        state["last_action"]=f"VENDA SIMULADA · {reason} · P&L {pnl:+.2f} USD"
-      elif state["asset"]==0 and (breakout or rising) and state["cash"]>=state.get("trade_amount",10):
-       margin=min(state.get("trade_amount",10),state["cash"]); qty=(margin*state["leverage"])/price
-       state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin
-       state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state["leverage"],"reason":"Vela de alta/rompimento","candle":"15s"})
-       state["last_action"]="COMPRA SIMULADA · vela 15s"
-     else:
-      state["signal_status"]="Aguardando 3 velas fechadas de 15 segundos"
-    if state["asset"]>0:
-     qty=state["asset"]; pnl=(price-state["avg_price"])*qty; margin=max(state.get("position_margin",0.0),0.01); pct=pnl/margin*100
-     reason="Take Profit automático" if pct>=state.get("take_profit_pct",3.0) else ("Stop Loss automático" if pct<=-state.get("stop_loss_pct",2.0) else None)
-     if reason:
+     if state.get("asset",0)>0:
+      qty=state["asset"]; pnl=(price-state["avg_price"])*qty; margin=max(state.get("position_margin",0.0),0.01)
       state["cash"]+=max(0.0,margin+pnl); state["asset"]=0.0; state["position_margin"]=0.0; state["realized_pnl"]+=pnl
-      state["trades"].append({"time":now(),"side":"SELL","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":reason,"candle":"15s"})
-      state["last_action"]=f"VENDA SIMULADA · {reason} · P&L {pnl:+.2f} USD"
+      state["trades"].append({"time":now(),"side":"SELL","price":price,"qty":qty,"notional":qty*price,"pnl":pnl,"reason":"Fechamento no fim da vela de 1 minuto","candle":"1m"})
+      state["last_action"]=f"VENDA SIMULADA · fim da vela 1m · P&L {pnl:+.2f} USD"
+     state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
+     state["last_candle_bucket"]=bucket
+     cs=state.get("candles",[]); bullish_signal=False
+     if len(cs)>=2:
+      prev=cs[-1]; before=cs[-2]
+      bullish_signal=(prev["close"]>prev["open"] and prev["close"]>before["close"])
+     if state.get("asset",0)<=0 and bullish_signal and state.get("cash",0)>=state.get("trade_amount",10):
+      margin=min(state.get("trade_amount",10),state["cash"]); qty=(margin*state.get("leverage",1))/price
+      state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin
+      state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Sinal de alta confirmado pela vela anterior","candle":"1m"})
+      state["last_action"]="COMPRA SIMULADA · sinal da vela 1m · fechará no próximo fechamento"
+      state["signal_status"]="Uma posição aberta para esta vela de 1 minuto"
+     else:
+      state["signal_status"]="Vela de 1m fechada; aguardando confirmação de alta"
     save()
    except Exception as e:
-    state["last_update"]=now(); state["errors"]=(state.get("errors",[])+[str(e)])[-5:]; state["last_action"]="Erro na cotação; veja a mensagem abaixo"; save()
+    state["last_update"]=now(); state["errors"]=(state.get("errors",[])+[str(e)])[-5:]; state["last_action"]="Erro na cotação; veja a mensagem abaixo"; state["signal_status"]="Erro ao atualizar preço"; save()
 threading.Thread(target=worker,daemon=True).start()
 PAGE = r"""
 <!doctype html><html lang="pt-br"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#201c35"><title>Kraken Paper Trader</title>
@@ -157,16 +147,8 @@ def set_risk():
 def start():
  with LOCK:
   state["running"]=True
-  # Open one immediate PAPER entry when a usable quote is already available.
-  price=state.get("last_price")
-  if state.get("asset",0)<=0 and price and price>0 and state.get("cash",0)>=state.get("trade_amount",10):
-   margin=min(state.get("trade_amount",10),state["cash"])
-   qty=(margin*state.get("leverage",1))/price
-   state["cash"]-=margin; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin
-   state["trades"].append({"time":now(),"side":"BUY","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"reason":"Entrada inicial de teste ao iniciar","candle":"15s"})
-   state["last_action"]=f"COMPRA SIMULADA INICIAL · {state.get('leverage',1)}x"
-  else:
-   state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando primeira cotação para entrada inicial."
+  state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando o sinal da vela de 1 minuto."
+  state["signal_status"]="Uma posição no máximo; fechamento ao fim da vela de 1 minuto"
   save(); return jsonify({"ok":True,"paper_only":True})
 @app.post("/api/stop")
 def stop():
