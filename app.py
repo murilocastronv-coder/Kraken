@@ -105,7 +105,13 @@ def account_action(action):
         if action == "warm":
             data = fx_request("POST", f"/accounts/{account_id}/warm", key, {})
         elif action == "status":
-            data = fx_request("GET", f"/accounts/{account_id}/status", key)
+            # The lifecycle endpoint may omit environment; read the account record too.
+            status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+            account_data = fx_request("GET", f"/accounts/{account_id}", key)
+            data = dict(status_data)
+            env = str(account_data.get("environment") or status_data.get("environment") or "").lower()
+            if env:
+                data["environment"] = env
         else:
             data = fx_request("GET", f"/accounts/{account_id}/positions", key)
         # Never represent an account as safely connected until the provider explicitly confirms demo.
