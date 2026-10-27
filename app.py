@@ -333,10 +333,12 @@ def place_order():
         if side not in ("buy", "sell") or instrument != "EURUSD" or volume != "0.01":
             return jsonify(error="Ordem bloqueada: somente buy/sell EURUSD com volume fixo 0.01."), 400
         status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
-        environment = str(status_data.get("environment", "")).lower()
+        # The status endpoint may omit environment; verify it against the account record too.
+        account_data = fx_request("GET", f"/accounts/{account_id}", key)
+        environment = str(account_data.get("environment") or status_data.get("environment") or "").lower()
         connection_status = str(status_data.get("state") or status_data.get("status") or "").lower()
         if environment != "demo" or connection_status != "ready":
-            return jsonify(error="Ordem bloqueada: FXAPIs precisa confirmar environment=demo e status=ready.", environment=environment or None, status=connection_status or None), 409
+            return jsonify(error="Ordem bloqueada: FXAPIs precisa confirmar environment=demo e status=ready.", environment=environment or None, status=connection_status or None, statusResponse=status_data), 409
         import uuid
         idem = str(uuid.uuid4())
         r = requests.post(API + f"/accounts/{account_id}/orders/market",
