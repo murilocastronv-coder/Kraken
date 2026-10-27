@@ -356,9 +356,10 @@ def place_order():
             result = {"error": "FXAPIs retornou uma resposta não JSON.", "status": r.status_code}
         if not r.ok:
             err = result.get("error") or result.get("message") or result.get("code") or ("HTTP " + str(r.status_code))
-            return jsonify(error=str(err)), r.status_code if 400 <= r.status_code < 600 else 502
+            return jsonify(error=str(err), code=result.get("code"), details=result.get("details"), retryable=result.get("retryable"), httpStatus=r.status_code, providerResponse=result), r.status_code if 400 <= r.status_code < 600 else 502
         data = result.get("data", result)
-        return jsonify({"ok": True, "message": "FXAPIs aceitou a solicitação de ordem na conta confirmada como demo. Confira o status e o ticket retornados pelo broker.", "side": side, "symbol": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
+        state = str(data.get("state") or "").lower()
+        return jsonify({"ok": True, "message": ("Ordem preenchida pelo broker." if state in ("filled","partially_filled") else "FXAPIs recebeu a solicitação, mas o preenchimento ainda não foi confirmado. Confira state e retcode no resultado e o histórico do MT5."), "side": side, "symbol": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
