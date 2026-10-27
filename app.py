@@ -1,9 +1,16 @@
 import os
+import time
+import uuid
+import threading
 import requests
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 API = "https://api.fxapis.com/v1"
+AUTO_LOCK = threading.Lock()
+AUTO_STATE = {"running": False, "message": "Automação desligada", "lastSignal": None, "lastTradeAt": None}
+AUTO_THREAD = None
 
 PAGE = r"""
 <!doctype html><html lang="pt-br"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -23,7 +30,7 @@ PAGE = r"""
 <div id="status" class="status">Ainda não conectado.</div>
 <button class="secondary" id="warm" disabled>Conectar / colocar conta online</button>
 <button class="secondary" id="check" disabled>Verificar estado da conexão</button><button class="secondary" id="diagnose" disabled>Diagnosticar servidor e alternativas</button><div class="grid"><div><label>Servidor alternativo (somente se a FXAPIs sugerir)</label><input id="altServer" placeholder="Servidor exato sugerido pela FXAPIs"></div><div><label>&nbsp;</label><button class="secondary" id="moveServer" type="button">Corrigir servidor da conta</button></div></div>
-<button class="secondary" id="positions" disabled>Consultar posições</button>
+<button class="secondary" id="positions" disabled>Consultar posições</button><button id="autoStart" type="button">Iniciar estratégia automática DEMO (2 min)</button><button class="secondary" id="autoStop" type="button">Parar estratégia automática</button><div id="autoStatus" class="status">Automação desligada. A estratégia só funciona enquanto o serviço estiver ativo.</div>
 <div class="grid"><div><label>Volume da ordem (lotes)</label><input id="volume" type="number" min="0.01" max="0.01" step="0.01" value="0.01" readonly></div><div><label>Ativo para ordem</label><input value="EURUSD" readonly></div></div><button id="buy" disabled>Comprar EURUSD · 0,01 lote</button><button id="sell" class="secondary" disabled>Vender EURUSD · 0,01 lote</button><p class="muted warning">As ordens só são liberadas depois de a FXAPIs confirmar explicitamente environment=demo e status=ready. Cada ordem exige toque manual e confirmação.</p><p class="muted warning">Importante: só continue se o servidor for realmente demo. O prefixo fx_test_ não garante um ambiente isolado. Nunca use uma conta real aqui. Não feche a página até concluir a verificação; os dados sensíveis ficam apenas na memória desta página.</p>
 </div>
 <script>
@@ -37,6 +44,8 @@ $('warm').onclick=async()=>{try{show('Conectando a conta…');let j=await call('
 $('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning');let verified=j.environment==='demo' && String(j.status||'').toLowerCase()==='ready';$('buy').disabled=!verified;$('sell').disabled=!verified;if(!verified)show({...j,warning:'Ordens bloqueadas: confirme environment=demo e status=ready.'},'warning')}catch(e){show(e.message,'err');$('buy').disabled=true;$('sell').disabled=true}};
 $('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
 $('diagnose').onclick=async()=>{try{show('Consultando dados da conta e estado atual, sem tentar novo login…');let j=await call('/api/diagnose',creds());if(j.suggestedServers&&j.suggestedServers.length){$('altServer').value=j.suggestedServers[0];}show(j,j.state==='invalid_credentials'?'warning':'ok')}catch(e){show(e.message,'err')}};
+$('autoStart').onclick=async()=>{if(!confirm('Iniciar automação SOMENTE na conta demo confirmada? A estratégia pode perder dinheiro virtual e não garante lucro.'))return;try{show('Validando conta demo e iniciando estratégia…');let j=await call('/api/auto/start',creds());$('autoStatus').textContent=JSON.stringify(j,null,2);show(j,'ok')}catch(e){show(e.message,'err')}};
+$('autoStop').onclick=async()=>{try{let j=await call('/api/auto/stop',creds());$('autoStatus').textContent=JSON.stringify(j,null,2);show(j,'ok')}catch(e){show(e.message,'err')}};
 $('moveServer').onclick=async()=>{const server=$('altServer').value.trim();if(!server){show('Primeiro clique em Diagnosticar e use somente um servidor sugerido pela FXAPIs.','warning');return;}if(!confirm('Trocar o servidor desta conta existente para '+server+'? A FXAPIs tentará conectar usando a senha já armazenada.'))return;try{show('Atualizando servidor na conta existente…');let j=await call('/api/server',{...creds(),newServer:server});show(j,'ok')}catch(e){show(e.message,'err')}};
 
 async function order(side){if(!confirm('Confirmar '+(side==='buy'?'COMPRA':'VENDA')+' manual de EURUSD de 0,01 lote na conta DEMO?'))return;try{let j=await call('/api/order',{...creds(),side,volume:'0.01',instrument:'EURUSD'});show(j,'ok')}catch(e){show(e.message,'err')}}$('buy').onclick=()=>order('buy');$('sell').onclick=()=>order('sell');
@@ -192,6 +201,114 @@ def positions():
     return account_action("positions")
 
 
+
+def auto_strategy_worker(api_key, account_id):
+    global AUTO_STATE
+    API_ROOT = API
+    def req(method, path, payload=None, idem=None):
+        headers={"Authorization":"Bearer "+api_key,"Accept":"application/json","Content-Type":"application/json"}
+        if idem: headers["Idempotency-Key"]=idem
+        r=requests.request(method, API_ROOT+path, headers=headers, json=payload, timeout=20)
+        try: body=r.json()
+        except Exception: raise RuntimeError("Resposta FXAPIs não JSON")
+        if not r.ok: raise RuntimeError(str(body.get("error") or body.get("message") or body.get("code") or ("HTTP "+str(r.status_code))))
+        return body.get("data", body)
+    try:
+        while True:
+            with AUTO_LOCK:
+                if not AUTO_STATE.get("running"): break
+            # Trade only at 2-minute boundaries; always close our opened position after 120 seconds.
+            now=time.time()
+            due=int(now//120)*120
+            with AUTO_LOCK:
+                opened=AUTO_STATE.get("opened")
+            if opened and now-opened.get("openedAt", now)>=120:
+                ticket=opened.get("ticket")
+                if ticket:
+                    req("POST",f"/accounts/{account_id}/positions/{ticket}/close",{}, "close_"+str(opened["orderId"]))
+                    with AUTO_LOCK:
+                        AUTO_STATE["opened"]=None
+                        AUTO_STATE["message"]="Posição fechada após 2 minutos"
+                else:
+                    raise RuntimeError("FXAPIs não devolveu ticket de posição; automação parada por segurança")
+            with AUTO_LOCK:
+                opened=AUTO_STATE.get("opened")
+                last_cycle=AUTO_STATE.get("lastCycle")
+            if not opened and last_cycle != due and now >= due+2:
+                status=req("GET",f"/accounts/{account_id}/status")
+                account=req("GET",f"/accounts/{account_id}")
+                env=str(account.get("environment") or status.get("environment") or "").lower()
+                state=str(status.get("state") or status.get("status") or "").lower()
+                if env!="demo" or state!="ready":
+                    raise RuntimeError("Parada: FXAPIs não confirmou environment=demo e state=ready")
+                candles_data=req("GET",f"/accounts/{account_id}/candles?instrument=EURUSD&timeframe=M1&count=40")
+                candles=candles_data.get("candles") or []
+                if len(candles)<25:
+                    raise RuntimeError("Ainda não há 25 candles M1 para calcular o sinal")
+                closes=[float(x.get("close")) for x in candles if x.get("close") is not None]
+                if len(closes)<25: raise RuntimeError("Candles insuficientes ou inválidos")
+                def ema(vals, period):
+                    a=2/(period+1); v=vals[0]
+                    for x in vals[1:]: v=a*x+(1-a)*v
+                    return v
+                e9=ema(closes[-30:],9); e21=ema(closes[-30:],21)
+                diffs=[closes[i]-closes[i-1] for i in range(1,len(closes))]
+                gains=[max(0,x) for x in diffs[-14:]]; losses=[max(0,-x) for x in diffs[-14:]]
+                avg_g=sum(gains)/max(1,len(gains)); avg_l=sum(losses)/max(1,len(losses))
+                rsi=100 if avg_l==0 else 100-(100/(1+avg_g/avg_l))
+                # Conservative directional filter; skips weak/contradictory signals.
+                side="buy" if e9>e21 and rsi>=52 else ("sell" if e9<e21 and rsi<=48 else None)
+                with AUTO_LOCK:
+                    AUTO_STATE["lastCycle"]=due
+                    AUTO_STATE["lastSignal"]={"side":side,"ema9":e9,"ema21":e21,"rsi":rsi,"at":datetime.now(timezone.utc).isoformat()}
+                if side:
+                    order=req("POST",f"/accounts/{account_id}/orders/market",{"symbol":"EURUSD","side":side,"volume":"0.01"}, "auto_"+str(due))
+                    ticket=order.get("brokerPositionId") or order.get("brokerOrderId")
+                    if not ticket: raise RuntimeError("Ordem sem ticket identificável; automação parada por segurança")
+                    with AUTO_LOCK:
+                        AUTO_STATE["opened"]={"ticket":str(ticket),"orderId":str(order.get("id") or due),"openedAt":time.time(),"side":side}
+                        AUTO_STATE["lastTradeAt"]=datetime.now(timezone.utc).isoformat()
+                        AUTO_STATE["message"]="Ordem "+side+" aberta; fechamento programado para 120 segundos"
+                else:
+                    with AUTO_LOCK: AUTO_STATE["message"]="Sem entrada: sinais contraditórios/fracos; ciclo ignorado para proteger a conta"
+            time.sleep(1)
+    except Exception as e:
+        with AUTO_LOCK:
+            AUTO_STATE["running"]=False
+            AUTO_STATE["message"]="Automação parada por segurança: "+str(e)
+    finally:
+        with AUTO_LOCK: AUTO_STATE["running"]=False
+
+@app.post("/api/auto/start")
+def auto_start():
+    global AUTO_THREAD, AUTO_STATE
+    d=request.get_json(force=True); key=d.get("apiKey",""); account_id=str(d.get("accountId") or "").strip()
+    if not account_id: return jsonify(error="Informe o ID da conta FXAPIs."),400
+    try:
+        status=fx_request("GET",f"/accounts/{account_id}/status",key)
+        account=fx_request("GET",f"/accounts/{account_id}",key)
+        env=str(account.get("environment") or status.get("environment") or "").lower()
+        state=str(status.get("state") or status.get("status") or "").lower()
+        if env!="demo" or state!="ready": return jsonify(error="Bloqueado: a FXAPIs precisa confirmar environment=demo e state=ready.",environment=env,state=state),409
+        with AUTO_LOCK:
+            if AUTO_STATE.get("running"): return jsonify(ok=True,message="Automação já está rodando.",state=AUTO_STATE)
+            AUTO_STATE={"running":True,"message":"Estratégia demo iniciada","lastSignal":None,"lastTradeAt":None,"opened":None,"lastCycle":None}
+            AUTO_THREAD=threading.Thread(target=auto_strategy_worker,args=(key,account_id),daemon=True)
+            AUTO_THREAD.start()
+        return jsonify(ok=True,message="Estratégia demo iniciada. EURUSD, volume fixo 0.01, filtro EMA9/EMA21 + RSI, tentativa a cada 2 minutos, fechamento após 120 s. Sinais fracos são ignorados; lucro não é garantido.",state=AUTO_STATE)
+    except Exception as e: return jsonify(error=str(e)),502
+
+@app.post("/api/auto/stop")
+def auto_stop():
+    global AUTO_STATE
+    with AUTO_LOCK:
+        AUTO_STATE["running"]=False
+        AUTO_STATE["message"]="Pedido para parar a automação recebido"
+    return jsonify(ok=True,message="Parada solicitada. Se houver posição aberta, verifique e feche-a manualmente pelo painel MT5/FXAPIs.",state=AUTO_STATE)
+
+@app.get("/api/auto/status")
+def auto_status():
+    with AUTO_LOCK: return jsonify(AUTO_STATE)
 
 @app.post("/api/order")
 def place_order():
