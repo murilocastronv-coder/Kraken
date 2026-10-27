@@ -75,7 +75,7 @@ def worker():
       exit_fee=qty*price*state.get("fee_rate",0.008); entry_fee=state.get("entry_fee",0.0); fees=entry_fee+exit_fee; net_pnl=pnl-fees
       state["cash"]+=max(0.0,margin+pnl-exit_fee); state["asset"]=0.0; state["position_margin"]=0.0; state["position_side"]=None; state["entry_fee"]=0.0; state["realized_pnl"]+=net_pnl; state["fees_paid"]=state.get("fees_paid",0.0)+exit_fee
       state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"gross_pnl":pnl,"fee_entry":entry_fee,"fee_exit":exit_fee,"fees":fees,"pnl":net_pnl,"reason":"Fechamento na virada da vela de 2 minutos com comissão simulada","candle":"2m","position_side":side})
-      state["last_action"]=f"FECHAMENTO SIMULADO {side} · fim da vela 15m · P&L {pnl:+.2f} USD"
+      state["last_action"]=f"FECHAMENTO SIMULADO {side} · fim da vela 2m · P&L {pnl:+.2f} USD"
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
      cs=state.get("candles",[]); direction=None
@@ -92,7 +92,7 @@ def worker():
       state["cash"]-=margin+entry_fee; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin; state["position_side"]=direction; state["entry_fee"]=entry_fee; state["fees_paid"]=state.get("fees_paid",0.0)+entry_fee
       state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"fee_entry":entry_fee,"fees":entry_fee,"pnl":-entry_fee,"reason":"Direção da vela 2m anterior; comissão simulada","candle":"1m","position_side":direction})
       state["last_action"]=f"ENTRADA SIMULADA {direction} · ciclo de 2 minutos"
-      state["signal_status"]="Uma única posição; fechamento na próxima virada dos 15 minutos"
+      state["signal_status"]="Uma única posição; fechamento na próxima virada dos 2 minutos"
      else:
       state["signal_status"]="Vela neutra ou sem margem disponível; aguardando próxima vela"
     save()
@@ -156,7 +156,7 @@ def set_risk():
 def start():
  with LOCK:
   state["running"]=True
-  state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando o sinal da vela de 1 minuto."
+  state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando o sinal da vela de 2 minutos."
   state["signal_status"]="Uma posição no máximo; fechamento ao fim da vela de 2 minutos"
   save(); return jsonify({"ok":True,"paper_only":True})
 @app.post("/api/stop")
@@ -168,7 +168,6 @@ def reset():
  global state
  with LOCK:
   state=fresh(); save(); return jsonify({"ok":True})
-if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")))
 
 @app.post("/api/lots")
 def set_lots():
@@ -179,3 +178,5 @@ def set_lots():
  with LOCK:
   state["lot_size"]=lots; state["last_action"]=f"Tamanho definido para {lots:.2f} lote(s) (simulação)."; save()
   return jsonify({"ok":True,"lot_size":lots,"paper_only":True})
+
+if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")))
