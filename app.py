@@ -22,7 +22,7 @@ PAGE = r"""
 <button id="connect" type="submit">Cadastrar conta demo na FXAPIs</button><button class="secondary" type="button" id="updatePassword">Atualizar senha da conta existente</button></form>
 <div id="status" class="status">Ainda não conectado.</div>
 <button class="secondary" id="warm" disabled>Conectar / colocar conta online</button>
-<button class="secondary" id="check" disabled>Verificar estado da conexão</button>
+<button class="secondary" id="check" disabled>Verificar estado da conexão</button><button class="secondary" id="diagnose" disabled>Diagnosticar servidor e alternativas</button><div class="grid"><div><label>Servidor alternativo (somente se a FXAPIs sugerir)</label><input id="altServer" placeholder="Servidor exato sugerido pela FXAPIs"></div><div><label>&nbsp;</label><button class="secondary" id="moveServer" type="button">Corrigir servidor da conta</button></div></div>
 <button class="secondary" id="positions" disabled>Consultar posições</button>
 <div class="grid"><div><label>Volume da ordem (lotes)</label><input id="volume" type="number" min="0.01" max="0.01" step="0.01" value="0.01" readonly></div><div><label>Ativo para ordem</label><input value="EURUSD" readonly></div></div><button id="buy" disabled>Comprar EURUSD · 0,01 lote</button><button id="sell" class="secondary" disabled>Vender EURUSD · 0,01 lote</button><p class="muted warning">As ordens só são liberadas depois de a FXAPIs confirmar explicitamente environment=demo e status=ready. Cada ordem exige toque manual e confirmação.</p><p class="muted warning">Importante: só continue se o servidor for realmente demo. O prefixo fx_test_ não garante um ambiente isolado. Nunca use uma conta real aqui. Não feche a página até concluir a verificação; os dados sensíveis ficam apenas na memória desta página.</p>
 </div>
@@ -31,11 +31,14 @@ const $=id=>document.getElementById(id);let accountId=null;
 function creds(){return {apiKey:$('key').value.trim(),accountId:$('accountIdInput').value.trim()||accountId,login:$('login').value.trim(),server:$('server').value.trim(),password:$('password').value}}
 function show(x,kind=''){ $('status').className='status '+kind; $('status').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
 async function call(path,body){let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
-$('updatePassword').onclick=async()=>{try{show('Atualizando senha da conta existente…');let j=await call('/api/password',creds());accountId=$('accountIdInput').value.trim()||accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;}catch(e){show(e.message,'err')}};
-$('f').addEventListener('submit',async e=>{e.preventDefault();$('connect').disabled=true;show('Cadastrando conta demo…');try{let j=await call('/api/connect',creds());accountId=j.accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;$('password').value='';}catch(e){show(e.message,'err')}finally{$('connect').disabled=false}});
+$('updatePassword').onclick=async()=>{try{show('Atualizando senha da conta existente…');let j=await call('/api/password',creds());accountId=$('accountIdInput').value.trim()||accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('diagnose').disabled=false;$('positions').disabled=false;}catch(e){show(e.message,'err')}};
+$('f').addEventListener('submit',async e=>{e.preventDefault();$('connect').disabled=true;show('Cadastrando conta demo…');try{let j=await call('/api/connect',creds());accountId=j.accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('diagnose').disabled=false;$('positions').disabled=false;$('password').value='';}catch(e){show(e.message,'err')}finally{$('connect').disabled=false}});
 $('warm').onclick=async()=>{try{show('Conectando a conta…');let j=await call('/api/warm',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
 $('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning');let verified=j.environment==='demo' && String(j.status||'').toLowerCase()==='ready';$('buy').disabled=!verified;$('sell').disabled=!verified;if(!verified)show({...j,warning:'Ordens bloqueadas: confirme environment=demo e status=ready.'},'warning')}catch(e){show(e.message,'err');$('buy').disabled=true;$('sell').disabled=true}};
 $('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
+$('diagnose').onclick=async()=>{try{show('Consultando dados da conta e estado atual, sem tentar novo login…');let j=await call('/api/diagnose',creds());if(j.suggestedServers&&j.suggestedServers.length){$('altServer').value=j.suggestedServers[0];}show(j,j.state==='invalid_credentials'?'warning':'ok')}catch(e){show(e.message,'err')}};
+$('moveServer').onclick=async()=>{const server=$('altServer').value.trim();if(!server){show('Primeiro clique em Diagnosticar e use somente um servidor sugerido pela FXAPIs.','warning');return;}if(!confirm('Trocar o servidor desta conta existente para '+server+'? A FXAPIs tentará conectar usando a senha já armazenada.'))return;try{show('Atualizando servidor na conta existente…');let j=await call('/api/server',{...creds(),newServer:server});show(j,'ok')}catch(e){show(e.message,'err')}};
+
 async function order(side){if(!confirm('Confirmar '+(side==='buy'?'COMPRA':'VENDA')+' manual de EURUSD de 0,01 lote na conta DEMO?'))return;try{let j=await call('/api/order',{...creds(),side,volume:'0.01',instrument:'EURUSD'});show(j,'ok')}catch(e){show(e.message,'err')}}$('buy').onclick=()=>order('buy');$('sell').onclick=()=>order('sell');
 </script></main></body></html>
 """
@@ -131,6 +134,42 @@ def update_password():
             return jsonify(error="Bloqueado: use somente servidor demo."), 400
         data = fx_request("POST", f"/accounts/{account_id}/password", key, {"password": password, "server": server})
         return jsonify({"ok": True, "accountId": account_id, "message": "Senha atualizada. Agora conecte a conta e verifique o estado.", "result": data})
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+
+@app.post("/api/diagnose")
+def diagnose():
+    try:
+        d = request.get_json(force=True)
+        account_id = str(d.get("accountId") or "").strip()
+        key = d.get("apiKey", "")
+        if not account_id:
+            return jsonify(error="Informe o ID da conta FXAPIs."), 400
+        account = fx_request("GET", f"/accounts/{account_id}", key)
+        status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+        problem = account.get("problem") or status_data.get("problem") or {}
+        return jsonify({"ok": True, "accountId": account_id, "login": account.get("login"),
+            "server": account.get("server"), "environment": account.get("environment"),
+            "state": status_data.get("state") or account.get("state"),
+            "detail": status_data.get("detail") or status_data.get("stateDetail"),
+            "problem": problem, "suggestedServers": problem.get("otherServers") or [],
+            "nextStep": "Use apenas um servidor alternativo explicitamente sugerido pela FXAPIs."})
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+
+@app.post("/api/server")
+def change_server():
+    try:
+        d = request.get_json(force=True)
+        account_id = str(d.get("accountId") or "").strip()
+        server = str(d.get("newServer") or "").strip()
+        if not account_id or not server:
+            return jsonify(error="Informe ID da conta e servidor alternativo."), 400
+        if "demo" not in server.lower():
+            return jsonify(error="Bloqueado: este painel aceita somente servidores demo."), 400
+        data = fx_request("POST", f"/accounts/{account_id}/server", d.get("apiKey", ""),
+                          {"server": server, "connect": False})
+        return jsonify({"ok": True, "message": "Servidor atualizado sem iniciar login automaticamente.", "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
