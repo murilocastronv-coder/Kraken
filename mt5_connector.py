@@ -144,7 +144,7 @@ def place_order():
             return jsonify(error="Ordem bloqueada: somente buy/sell EURUSD com volume fixo 0.01."), 400
         status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
         environment = str(status_data.get("environment", "")).lower()
-        connection_status = str(status_data.get("status", "")).lower()
+        connection_status = str(status_data.get("state") or status_data.get("status") or "").lower()
         if environment != "demo" or connection_status != "ready":
             return jsonify(error="Ordem bloqueada: FXAPIs precisa confirmar environment=demo e status=ready.", environment=environment or None, status=connection_status or None), 409
         import uuid
@@ -156,7 +156,7 @@ def place_order():
                 "Accept": "application/json",
                 "Idempotency-Key": idem
             },
-            json={"instrument": instrument, "side": side, "volume": volume, "clientOrderId": idem},
+            json={"symbol": instrument, "side": side, "volume": volume, "clientOrderId": idem},
             timeout=30)
         try:
             result = r.json()
@@ -166,7 +166,7 @@ def place_order():
             err = result.get("error") or result.get("message") or result.get("code") or ("HTTP " + str(r.status_code))
             return jsonify(error=str(err)), r.status_code if 400 <= r.status_code < 600 else 502
         data = result.get("data", result)
-        return jsonify({"ok": True, "message": "Ordem enviada à FXAPIs na conta confirmada como demo.", "side": side, "instrument": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
+        return jsonify({"ok": True, "message": "FXAPIs aceitou a solicitação de ordem na conta confirmada como demo. Confira o status e o ticket retornados pelo broker.", "side": side, "symbol": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
