@@ -15,10 +15,11 @@ PAGE = r"""
 <div class="card"><form id="f">
 <label>Chave API FXAPIs (crie uma nova, com accounts:write)</label><input id="key" type="password" autocomplete="off" required placeholder="Cole sua chave FXAPIs nova">
 <div class="grid"><div><label>Login MT5</label><input id="login" value="5057912119" required></div><div><label>Servidor exato</label><input id="server" value="MetaQuotes-Demo" required></div></div>
+<label>ID da conta já cadastrada na FXAPIs</label><input id="accountIdInput" value="e2fb41f8-e02b-43b1-bf74-06892c0f9359" placeholder="ID da conta FXAPIs">
 <label>Senha de negociação MT5 (não a senha do investidor)</label><input id="password" type="password" autocomplete="off" required>
 <label>Ativo</label><input value="EURUSD" readonly>
 <label>Timeframe</label><input value="M15" readonly>
-<button id="connect" type="submit">Cadastrar conta demo na FXAPIs</button></form>
+<button id="connect" type="submit">Cadastrar conta demo na FXAPIs</button><button class="secondary" type="button" id="updatePassword">Atualizar senha da conta existente</button></form>
 <div id="status" class="status">Ainda não conectado.</div>
 <button class="secondary" id="warm" disabled>Conectar / colocar conta online</button>
 <button class="secondary" id="check" disabled>Verificar estado da conexão</button>
@@ -27,9 +28,10 @@ PAGE = r"""
 </div>
 <script>
 const $=id=>document.getElementById(id);let accountId=null;
-function creds(){return {apiKey:$('key').value.trim(),accountId,login:$('login').value.trim(),server:$('server').value.trim(),password:$('password').value}}
+function creds(){return {apiKey:$('key').value.trim(),accountId:$('accountIdInput').value.trim()||accountId,login:$('login').value.trim(),server:$('server').value.trim(),password:$('password').value}}
 function show(x,kind=''){ $('status').className='status '+kind; $('status').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
 async function call(path,body){let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+$('updatePassword').onclick=async()=>{try{show('Atualizando senha da conta existente…');let j=await call('/api/password',creds());accountId=$('accountIdInput').value.trim()||accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;}catch(e){show(e.message,'err')}};
 $('f').addEventListener('submit',async e=>{e.preventDefault();$('connect').disabled=true;show('Cadastrando conta demo…');try{let j=await call('/api/connect',creds());accountId=j.accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;$('password').value='';}catch(e){show(e.message,'err')}finally{$('connect').disabled=false}});
 $('warm').onclick=async()=>{try{show('Conectando a conta…');let j=await call('/api/warm',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
 $('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning');let verified=j.environment==='demo' && String(j.status||'').toLowerCase()==='ready';$('buy').disabled=!verified;$('sell').disabled=!verified;if(!verified)show({...j,warning:'Ordens bloqueadas: confirme environment=demo e status=ready.'},'warning')}catch(e){show(e.message,'err');$('buy').disabled=true;$('sell').disabled=true}};
@@ -112,6 +114,23 @@ def account_action(action):
             data["demo_verified"] = env == "demo"
             data["warning"] = "Se demo_verified for false, não envie ordens."
         return jsonify(data)
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+
+@app.post("/api/password")
+def update_password():
+    try:
+        d = request.get_json(force=True)
+        account_id = str(d.get("accountId") or "").strip()
+        password = d.get("password", "")
+        server = str(d.get("server") or "").strip()
+        key = d.get("apiKey", "")
+        if not account_id or not password or not server:
+            return jsonify(error="Informe o ID da conta, servidor e senha principal do MT5."), 400
+        if "demo" not in server.lower():
+            return jsonify(error="Bloqueado: use somente servidor demo."), 400
+        data = fx_request("POST", f"/accounts/{account_id}/password", key, {"password": password, "server": server})
+        return jsonify({"ok": True, "accountId": account_id, "message": "Senha atualizada. Agora conecte a conta e verifique o estado.", "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
