@@ -7,7 +7,7 @@ INITIAL=float(os.getenv("INITIAL_CASH","100")); SYMBOL=os.getenv("SYMBOL","EUR/U
 LOCK=threading.RLock()
 def now(): return datetime.now(timezone.utc).isoformat()
 def fresh():
- return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"position_side":None,"entry_fee":0.0,"fees_paid":0.0,"fee_rate":0.002,"leverage":1,"trade_amount":10.0,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
+ return {"paper_only":True,"running":False,"cash":INITIAL,"asset":0.0,"avg_price":0.0,"position_margin":0.0,"position_side":None,"entry_fee":0.0,"fees_paid":0.0,"fee_rate":0.002,"leverage":1,"trade_amount":10.0,"lot_size":0.01,"take_profit_pct":3.0,"stop_loss_pct":2.0,"realized_pnl":0.0,"trades":[],"prices":[],"last_price":None,"last_action":"Pronto para iniciar","last_update":None,"initial_cash":INITIAL,"symbol":SYMBOL,"errors":[]}
 def save():
  os.makedirs(os.path.dirname(STATE_FILE) or ".",exist_ok=True)
  with open(STATE_FILE+".tmp","w") as f: json.dump(state,f)
@@ -36,7 +36,7 @@ def findprice(x):
  return None
 def getprice():
  # EUR/USD is sourced from Yahoo Finance FX data; Kraken spot does not list this forex pair.
- url="https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?range=1d&interval=15m"
+ url="https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?range=1d&interval=1m"
  req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"})
  try:
   with urllib.request.urlopen(req,timeout=20) as resp: data=json.loads(resp.read().decode("utf-8"))
@@ -53,14 +53,14 @@ def worker():
   with LOCK:
    if not state["running"]: continue
    try:
-    price=getprice(); bucket=int(time.time()//900)
+    price=getprice(); bucket=int(time.time()//120)
     state["last_price"]=price; state["last_update"]=now()
     state["prices"]=(state.get("prices",[])+[price])[-300:]
     candle=state.get("current_candle")
     if candle is None:
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
-     state["signal_status"]="Montando a vela atual de 15 minutos"
+     state["signal_status"]="Montando a vela atual de 2 minutos"
     elif bucket == state.get("last_candle_bucket"):
      candle["high"]=max(candle["high"],price); candle["low"]=min(candle["low"],price); candle["close"]=price
      state["current_candle"]=candle
@@ -74,7 +74,7 @@ def worker():
       pnl=(price-state["avg_price"])*qty*direction; margin=max(state.get("position_margin",0.0),0.01)
       exit_fee=qty*price*state.get("fee_rate",0.008); entry_fee=state.get("entry_fee",0.0); fees=entry_fee+exit_fee; net_pnl=pnl-fees
       state["cash"]+=max(0.0,margin+pnl-exit_fee); state["asset"]=0.0; state["position_margin"]=0.0; state["position_side"]=None; state["entry_fee"]=0.0; state["realized_pnl"]+=net_pnl; state["fees_paid"]=state.get("fees_paid",0.0)+exit_fee
-      state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"gross_pnl":pnl,"fee_entry":entry_fee,"fee_exit":exit_fee,"fees":fees,"pnl":net_pnl,"reason":"Fechamento na virada da vela de 15 minutos com comissão simulada","candle":"15m","position_side":side})
+      state["trades"].append({"time":now(),"side":"SELL" if side=="LONG" else "BUY_TO_COVER","price":price,"qty":qty,"notional":qty*price,"gross_pnl":pnl,"fee_entry":entry_fee,"fee_exit":exit_fee,"fees":fees,"pnl":net_pnl,"reason":"Fechamento na virada da vela de 2 minutos com comissão simulada","candle":"2m","position_side":side})
       state["last_action"]=f"FECHAMENTO SIMULADO {side} · fim da vela 15m · P&L {pnl:+.2f} USD"
      state["current_candle"]={"bucket":bucket,"open":price,"high":price,"low":price,"close":price,"time":now()}
      state["last_candle_bucket"]=bucket
@@ -85,13 +85,13 @@ def worker():
       elif prev["close"]<prev["open"]: direction="SHORT"
      # One position per minute: follow the direction of the just-closed candle.
      if state.get("asset",0)<=0 and direction and state.get("cash",0)>=state.get("trade_amount",10):
-      margin=min(state.get("trade_amount",10),state["cash"]); qty=(margin*state.get("leverage",1))/price
+      margin=min(state.get("trade_amount",10),state["cash"]); qty=state.get("lot_size",0.01)*100000
       entry_fee=qty*price*state.get("fee_rate",0.008)
       if margin+entry_fee>state["cash"]:
-       margin=max(0.0,state["cash"]/(1+state.get("leverage",1)*state.get("fee_rate",0.008))); qty=(margin*state.get("leverage",1))/price; entry_fee=qty*price*state.get("fee_rate",0.008)
+       margin=max(0.0,state["cash"]/(1+state.get("leverage",1)*state.get("fee_rate",0.008))); qty=state.get("lot_size",0.01)*100000; entry_fee=qty*price*state.get("fee_rate",0.008)
       state["cash"]-=margin+entry_fee; state["asset"]=qty; state["avg_price"]=price; state["position_margin"]=margin; state["position_side"]=direction; state["entry_fee"]=entry_fee; state["fees_paid"]=state.get("fees_paid",0.0)+entry_fee
-      state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"fee_entry":entry_fee,"fees":entry_fee,"pnl":-entry_fee,"reason":"Direção da vela 15m anterior; comissão simulada","candle":"1m","position_side":direction})
-      state["last_action"]=f"ENTRADA SIMULADA {direction} · ciclo de 1 minuto"
+      state["trades"].append({"time":now(),"side":"BUY" if direction=="LONG" else "SELL_SHORT","price":price,"qty":qty,"notional":qty*price,"margin":margin,"leverage":state.get("leverage",1),"fee_entry":entry_fee,"fees":entry_fee,"pnl":-entry_fee,"reason":"Direção da vela 2m anterior; comissão simulada","candle":"1m","position_side":direction})
+      state["last_action"]=f"ENTRADA SIMULADA {direction} · ciclo de 2 minutos"
       state["signal_status"]="Uma única posição; fechamento na próxima virada dos 15 minutos"
      else:
       state["signal_status"]="Vela neutra ou sem margem disponível; aguardando próxima vela"
@@ -103,19 +103,19 @@ PAGE = r"""
 <!doctype html><html lang="pt-br"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#201c35"><title>Kraken EUR/USD Paper Trader</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#101018;color:#f4f3fa;font:16px system-ui,sans-serif}.wrap{max-width:850px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}.brand{font-size:22px;font-weight:800}.tag{background:#164b3b;color:#a4f3cf;padding:7px 10px;border-radius:999px;font-size:12px;font-weight:800}.sub,.label{color:#aaa7bd;font-size:12px;margin-top:5px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:18px 0}.card{background:#1b1a27;border:1px solid #302d42;border-radius:16px;padding:15px;min-width:0}.val{font-size:22px;font-weight:750;margin-top:6px;overflow-wrap:anywhere}.buttons{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.btn{border:0;border-radius:12px;padding:13px 17px;font-weight:750;font-size:14px;background:#8264ff;color:white}.stop{background:#3a354c}.section{font-weight:750;margin:22px 0 10px}.trade{display:grid;grid-template-columns:70px 1fr 1fr;gap:8px;padding:11px 0;border-bottom:1px solid #302d42;font-size:12px}.buy{color:#6ce5b1}.sell{color:#ff8d9a}.foot{color:#8c899f;font-size:12px;line-height:1.5;margin-top:20px}.error{color:#ff9a9a;font-size:12px;margin-top:10px}@media(min-width:600px){.grid{grid-template-columns:repeat(4,minmax(0,1fr))}.val{font-size:24px}}
-</style></head><body><main class="wrap"><div class="top"><div><div class="brand">Kraken EUR/USD Paper Trader</div><div class="sub">Forex EUR/USD · velas de 15 minutos · cotação pública externa</div></div><div class="tag">SIMULAÇÃO · SEM DINHEIRO REAL</div></div>
+</style></head><body><main class="wrap"><div class="top"><div><div class="brand">Kraken EUR/USD Paper Trader</div><div class="sub">Forex EUR/USD · velas de 2 minutos · cotação pública externa</div></div><div class="tag">SIMULAÇÃO · SEM DINHEIRO REAL</div></div>
 <div class="grid"><div class="card"><div class="label">Patrimônio simulado</div><div class="val" id="equity">—</div><div class="sub">Capital inicial: <span id="initial">—</span></div></div><div class="card"><div class="label">Preço de mercado</div><div class="val" id="price">—</div></div><div class="card"><div class="label">P&L total</div><div class="val" id="pnl">—</div></div><div class="card"><div class="label">Estado do robô</div><div class="val" id="run">Parado</div></div></div>
 <div class="card"><div class="label">Valor por operação em USD (margem)</div><input id="tradeAmount" type="number" min="1" max="100" step="0.01" value="10" inputmode="decimal" onchange="setTradeAmount(this.value)" style="margin-top:8px;padding:12px;border-radius:10px;background:#29263a;color:#fff;border:1px solid #48415f;width:100%;font-size:16px"><div class="label" style="margin-top:12px">Take Profit (% da margem)</div><input id="tp" type="number" min="0.5" max="50" step="0.5" value="3" onchange="setRisk()" style="padding:10px;background:#29263a;color:#fff;width:100%"><div class="label" style="margin-top:12px">Stop Loss (% da margem)</div><input id="sl" type="number" min="0.5" max="50" step="0.5" value="2" onchange="setRisk()" style="padding:10px;background:#29263a;color:#fff;width:100%"><div class="label" style="margin-top:12px">Alavancagem EUR/USD na Kraken</div><select id="leverage" onchange="setLeverage(this.value)" style="margin-top:8px;padding:12px;border-radius:10px;background:#29263a;color:#fff;border:1px solid #48415f;width:100%;font-size:16px"><option value="1">1x · máximo disponível para EUR/USD nesta simulação</option></select><div class="sub">A tabela oficial de margem da Kraken não lista EUR/USD como par elegível para alavancagem. Por isso esta simulação usa 1x; não inventa uma alavancagem que a Kraken não disponibiliza para este par.</div></div><div class="buttons"><button class="btn" onclick="act('start')">Iniciar robô demo</button><button class="btn stop" onclick="act('stop')">Parar robô</button><button class="btn stop" onclick="act('reset')">Reiniciar saldo demo</button></div>
 <div class="card"><div class="label">Última ação</div><div class="val" style="font-size:16px" id="action">Carregando…</div><div class="sub" id="updated"></div><div class="error" id="err"></div></div>
 <div class="section">Posição aberta e evolução</div><div class="grid"><div class="card"><div class="label">Valor da posição</div><div class="val" id="position">—</div></div><div class="card"><div class="label">Lucro/prejuízo não realizado</div><div class="val" id="unrealized">—</div></div></div><div class="card"><div class="label">Gráfico de preço recente</div><svg id="chart" viewBox="0 0 600 150" style="width:100%;height:auto;margin-top:12px" role="img" aria-label="Gráfico do preço recente"><polyline points="" fill="none" stroke="#8b6cff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><div class="sub">Amostras recebidas enquanto o robô está ligado.</div></div><div class="section">Histórico de ordens simuladas</div><div class="card" id="trades">Nenhuma ordem ainda.</div>
-<div class="foot">O app consulta apenas cotações públicas e simula compras/vendas dentro do servidor. Não usa API Key e não envia ordens reais. Cotação EUR/USD obtida de fonte pública externa; velas de 15 minutos. Comissão configurada como estimativa de 0,20% por execução, não confirmada para execução real deste par na Kraken. Simulação apenas; sem ordens reais e sem garantia de lucro.</div></main>
+<div class="foot">O app consulta apenas cotações públicas e simula compras/vendas dentro do servidor. Não usa API Key e não envia ordens reais. Cotação EUR/USD obtida de fonte pública externa; velas de 2 minutos. Comissão configurada como estimativa de 0,20% por execução, não confirmada para execução real deste par na Kraken. Simulação apenas; sem ordens reais e sem garantia de lucro.</div></main>
 <script>
 async function postSettings(path,data){let r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});let j=await r.json();if(!r.ok)alert(j.error||"Erro ao atualizar");refresh()}
-async function setLeverage(v){postSettings("/api/leverage",{leverage:Number(v)})}
+async function setLots(v){postSettings("/api/lots",{lots:Number(v)})}\nasync function setLeverage(v){postSettings("/api/leverage",{leverage:Number(v)})}
 async function setTradeAmount(v){postSettings("/api/amount",{amount:Number(v)})}
 async function setRisk(){postSettings("/api/risk",{take_profit_pct:Number(document.getElementById("tp").value),stop_loss_pct:Number(document.getElementById("sl").value)})}
 const money=n=>Number(n||0).toLocaleString('en-US',{style:'currency',currency:'USD'});
-async function refresh(){try{let r=await fetch('/api/state'),s=await r.json();let equity=s.cash+s.position_margin+s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);if(document.activeElement!==document.getElementById("leverage"))document.getElementById("leverage").value=String(s.leverage||1);if(document.activeElement!==document.getElementById("tradeAmount"))document.getElementById("tradeAmount").value=String(s.trade_amount||10);if(document.activeElement!==document.getElementById("tp"))document.getElementById("tp").value=String(s.take_profit_pct||3);if(document.activeElement!==document.getElementById("sl"))document.getElementById("sl").value=String(s.stop_loss_pct||2);document.getElementById('equity').textContent=money(equity);document.getElementById('initial').textContent=money(s.initial_cash);document.getElementById('price').textContent=s.last_price?money(s.last_price):'Aguardando';let pnl=equity-s.initial_cash,p=document.getElementById('pnl');p.textContent=(pnl>=0?'+':'')+money(pnl);p.style.color=pnl>=0?'#6ce5b1':'#ff8d9a';document.getElementById('run').textContent=s.running?'Rodando':'Parado';document.getElementById('position').textContent=money(s.asset*(s.last_price||s.avg_price||0));let upnl=s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);let u=document.getElementById('unrealized');u.textContent=(upnl>=0?'+':'')+money(upnl);u.style.color=upnl>=0?'#6ce5b1':'#ff8d9a';let vals=s.prices||[];let line=document.querySelector('#chart polyline');if(vals.length>1){let lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1;line.setAttribute('points',vals.map((v,i)=>`${i*600/(vals.length-1)},${140-((v-lo)/span)*125}`).join(' '))}document.getElementById('action').textContent=s.last_action;document.getElementById('updated').textContent='Atualização: '+(s.last_update||'—')+' · '+s.symbol;document.getElementById('err').textContent=(s.errors||[]).slice(-1)[0]||'';let rows=(s.trades||[]).slice().reverse().slice(0,20);document.getElementById('trades').innerHTML=rows.length?rows.map(t=>`<div class="trade"><b class="${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'COMPRA':'VENDA'}</b><span>${new Date(t.time).toLocaleString()}</span><span>${money(t.price)}</span><span>Qtd. ${Number(t.qty).toFixed(6)}</span><span>${money(t.notional)}</span><span>${t.pnl===undefined?'':'P&L '+money(t.pnl)}</span></div>`).join(''):'Nenhuma operação ainda.'}catch(e){}}
+async function refresh(){try{let r=await fetch('/api/state'),s=await r.json();let equity=s.cash+s.position_margin+s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);if(document.activeElement!==document.getElementById("lots"))document.getElementById("lots").value=String(s.lot_size||0.01);if(document.activeElement!==document.getElementById("leverage"))document.getElementById("leverage").value=String(s.leverage||1);if(document.activeElement!==document.getElementById("tradeAmount"))document.getElementById("tradeAmount").value=String(s.trade_amount||10);if(document.activeElement!==document.getElementById("tp"))document.getElementById("tp").value=String(s.take_profit_pct||3);if(document.activeElement!==document.getElementById("sl"))document.getElementById("sl").value=String(s.stop_loss_pct||2);document.getElementById('equity').textContent=money(equity);document.getElementById('initial').textContent=money(s.initial_cash);document.getElementById('price').textContent=s.last_price?money(s.last_price):'Aguardando';let pnl=equity-s.initial_cash,p=document.getElementById('pnl');p.textContent=(pnl>=0?'+':'')+money(pnl);p.style.color=pnl>=0?'#6ce5b1':'#ff8d9a';document.getElementById('run').textContent=s.running?'Rodando':'Parado';document.getElementById('position').textContent=money(s.asset*(s.last_price||s.avg_price||0));let upnl=s.asset*((s.last_price||s.avg_price||0)-(s.avg_price||0))*(s.position_side==="SHORT"?-1:1);let u=document.getElementById('unrealized');u.textContent=(upnl>=0?'+':'')+money(upnl);u.style.color=upnl>=0?'#6ce5b1':'#ff8d9a';let vals=s.prices||[];let line=document.querySelector('#chart polyline');if(vals.length>1){let lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1;line.setAttribute('points',vals.map((v,i)=>`${i*600/(vals.length-1)},${140-((v-lo)/span)*125}`).join(' '))}document.getElementById('action').textContent=s.last_action;document.getElementById('updated').textContent='Atualização: '+(s.last_update||'—')+' · '+s.symbol;document.getElementById('err').textContent=(s.errors||[]).slice(-1)[0]||'';let rows=(s.trades||[]).slice().reverse().slice(0,20);document.getElementById('trades').innerHTML=rows.length?rows.map(t=>`<div class="trade"><b class="${t.side==='BUY'?'buy':'sell'}">${t.side==='BUY'?'COMPRA':'VENDA'}</b><span>${new Date(t.time).toLocaleString()}</span><span>${money(t.price)}</span><span>Qtd. ${Number(t.qty).toFixed(6)}</span><span>${money(t.notional)}</span><span>${t.pnl===undefined?'':'P&L '+money(t.pnl)}</span></div>`).join(''):'Nenhuma operação ainda.'}catch(e){}}
 async function act(a){let r=await fetch('/api/'+a,{method:'POST'}),j=await r.json();if(!r.ok)alert(j.error||'Erro');refresh()}setInterval(refresh,5000);refresh();
 </script></body></html>
 """
@@ -157,7 +157,7 @@ def start():
  with LOCK:
   state["running"]=True
   state["last_action"]="Robô iniciado em SIMULAÇÃO; aguardando o sinal da vela de 1 minuto."
-  state["signal_status"]="Uma posição no máximo; fechamento ao fim da vela de 15 minutos"
+  state["signal_status"]="Uma posição no máximo; fechamento ao fim da vela de 2 minutos"
   save(); return jsonify({"ok":True,"paper_only":True})
 @app.post("/api/stop")
 def stop():
@@ -169,3 +169,13 @@ def reset():
  with LOCK:
   state=fresh(); save(); return jsonify({"ok":True})
 if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")))
+
+@app.post("/api/lots")
+def set_lots():
+ from flask import request
+ try: lots=float((request.get_json(silent=True) or {}).get("lots",0.01))
+ except Exception: return jsonify({"error":"Tamanho de lote inválido"}),400
+ if lots not in (0.01,0.02,0.05,0.10): return jsonify({"error":"Escolha um dos lotes disponíveis."}),400
+ with LOCK:
+  state["lot_size"]=lots; state["last_action"]=f"Tamanho definido para {lots:.2f} lote(s) (simulação)."; save()
+  return jsonify({"ok":True,"lot_size":lots,"paper_only":True})
