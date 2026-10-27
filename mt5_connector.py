@@ -33,7 +33,8 @@ async function call(path,body){let r=await fetch(path,{method:'POST',headers:{'C
 $('f').addEventListener('submit',async e=>{e.preventDefault();$('connect').disabled=true;show('Cadastrando conta demo…');try{let j=await call('/api/connect',creds());accountId=j.accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;$('password').value='';}catch(e){show(e.message,'err')}finally{$('connect').disabled=false}});
 $('warm').onclick=async()=>{try{show('Conectando a conta…');let j=await call('/api/warm',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
 $('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning');let verified=j.environment==='demo' && String(j.status||'').toLowerCase()==='ready';$('buy').disabled=!verified;$('sell').disabled=!verified;if(!verified)show({...j,warning:'Ordens bloqueadas: confirme environment=demo e status=ready.'},'warning')}catch(e){show(e.message,'err');$('buy').disabled=true;$('sell').disabled=true}};
-$('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};\nasync function order(side){if(!confirm('Confirmar '+(side==='buy'?'COMPRA':'VENDA')+' manual de EURUSD de 0,01 lote na conta DEMO?'))return;try{let j=await call('/api/order',{...creds(),side,volume:'0.01',instrument:'EURUSD'});show(j,'ok')}catch(e){show(e.message,'err')}}$('buy').onclick=()=>order('buy');$('sell').onclick=()=>order('sell');
+$('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
+async function order(side){if(!confirm('Confirmar '+(side==='buy'?'COMPRA':'VENDA')+' manual de EURUSD de 0,01 lote na conta DEMO?'))return;try{let j=await call('/api/order',{...creds(),side,volume:'0.01',instrument:'EURUSD'});show(j,'ok')}catch(e){show(e.message,'err')}}$('buy').onclick=()=>order('buy');$('sell').onclick=()=>order('sell');
 </script></main></body></html>
 """
 
@@ -126,8 +127,6 @@ def status():
 def positions():
     return account_action("positions")
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
 
 
 @app.post("/api/order")
@@ -170,3 +169,6 @@ def place_order():
         return jsonify({"ok": True, "message": "Ordem enviada à FXAPIs na conta confirmada como demo.", "side": side, "instrument": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
