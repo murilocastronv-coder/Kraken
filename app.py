@@ -321,6 +321,7 @@ def auto_status():
 
 @app.post("/api/order")
 def place_order():
+    """Submit one explicitly confirmed demo order; warm and poll the demo account first."""
     try:
         d = request.get_json(force=True)
         key = d.get("apiKey", "")
@@ -329,37 +330,59 @@ def place_order():
         instrument = str(d.get("instrument") or "")
         volume = str(d.get("volume") or "")
         if not account_id:
-            return jsonify(error="Cadastre a conta e obtenha o ID primeiro."), 400
+            return jsonify(error="Informe o ID da conta FXAPIs."), 400
         if side not in ("buy", "sell") or instrument != "EURUSD" or volume != "0.01":
-            return jsonify(error="Ordem bloqueada: somente buy/sell EURUSD com volume fixo 0.01."), 400
-        status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
-        # The status endpoint may omit environment; verify it against the account record too.
+            return jsonify(error="Teste bloqueado: permitido apenas buy/sell EURUSD com volume 0.01 na conta demo."), 400
+
+        # Check the account's actual environment before doing anything that can place an order.
         account_data = fx_request("GET", f"/accounts/{account_id}", key)
-        environment = str(account_data.get("environment") or status_data.get("environment") or "").lower()
-        connection_status = str(status_data.get("state") or status_data.get("status") or "").lower()
-        if environment != "demo" or connection_status != "ready":
-            return jsonify(error="Ordem bloqueada: FXAPIs precisa confirmar environment=demo e status=ready.", environment=environment or None, status=connection_status or None, statusResponse=status_data), 409
-        import uuid
+        environment = str(account_data.get("environment") or "").lower()
+        if environment != "demo":
+            return jsonify(error="Bloqueado: a FXAPIs não confirmou que esta conta é DEMO.", environment=environment or None), 409
+
+        # warm_on_demand accounts may not be ready until explicitly warmed. Poll lifecycle safely.
+        status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+        state = str(status_data.get("state") or status_data.get("status") or "").lower()
+        if state != "ready":
+            if state in ("invalid_credentials", "trading_disabled", "needs_2fa", "needs_certificate"):
+                return jsonify(error="A conta precisa de atenção antes de negociar.", state=state, detail=status_data.get("detail")), 409
+            fx_request("POST", f"/accounts/{account_id}/warm", key, {})
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                time.sleep(2)
+                status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+                state = str(status_data.get("state") or status_data.get("status") or "").lower()
+                if state == "ready":
+                    break
+                if state in ("invalid_credentials", "trading_disabled", "needs_2fa", "needs_certificate", "error"):
+                    return jsonify(error="A conta não ficou pronta para negociar.", state=state, detail=status_data.get("detail")), 409
+            if state != "ready":
+                return jsonify(error="Tempo esgotado aguardando a conta demo ficar pronta. Nenhuma ordem foi enviada.", state=state, detail=status_data.get("detail")), 504
+
         idem = str(uuid.uuid4())
-        r = requests.post(API + f"/accounts/{account_id}/orders/market",
-            headers={
-                "Authorization": "Bearer " + key,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Idempotency-Key": idem
-            },
-            json={"symbol": instrument, "side": side, "volume": volume, "clientOrderId": idem},
-            timeout=30)
+        try:
+            r = requests.post(API + f"/accounts/{account_id}/orders/market",
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                         "Accept": "application/json", "Idempotency-Key": idem},
+                json={"symbol": instrument, "side": side, "volume": volume, "deviationPoints": 20},
+                timeout=90)
+        except requests.RequestException as e:
+            return jsonify(error="Falha de comunicação ao enviar ordem. Não repita sem verificar o histórico da FXAPIs.", details=str(e), idempotencyKey=idem), 502
         try:
             result = r.json()
         except Exception:
-            result = {"error": "FXAPIs retornou uma resposta não JSON.", "status": r.status_code}
+            result = {"error": "FXAPIs retornou resposta não JSON.", "httpStatus": r.status_code}
+        data = result.get("data", result)
         if not r.ok:
             err = result.get("error") or result.get("message") or result.get("code") or ("HTTP " + str(r.status_code))
-            return jsonify(error=str(err), code=result.get("code"), details=result.get("details"), retryable=result.get("retryable"), httpStatus=r.status_code, providerResponse=result), r.status_code if 400 <= r.status_code < 600 else 502
-        data = result.get("data", result)
+            return jsonify(error=str(err), code=result.get("code"), details=result.get("details"),
+                           retryable=result.get("retryable"), httpStatus=r.status_code,
+                           providerResponse=data, idempotencyKey=idem), r.status_code if 400 <= r.status_code < 600 else 502
         state = str(data.get("state") or "").lower()
-        return jsonify({"ok": True, "message": ("Ordem preenchida pelo broker." if state in ("filled","partially_filled") else "FXAPIs recebeu a solicitação, mas o preenchimento ainda não foi confirmado. Confira state e retcode no resultado e o histórico do MT5."), "side": side, "symbol": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
+        return jsonify({"ok": True,
+            "message": ("Ordem preenchida pelo broker." if state in ("filled", "partially_filled")
+                        else "Pedido recebido pela FXAPIs; confira state/retcode e o histórico do MT5 para confirmar o preenchimento."),
+            "side": side, "symbol": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
     except Exception as e:
         return jsonify(error=str(e)), 502
 
