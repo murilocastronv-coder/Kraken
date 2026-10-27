@@ -23,7 +23,7 @@ PAGE = r"""
 <button class="secondary" id="warm" disabled>Conectar / colocar conta online</button>
 <button class="secondary" id="check" disabled>Verificar estado da conexão</button>
 <button class="secondary" id="positions" disabled>Consultar posições</button>
-<p class="muted warning">Importante: só continue se o servidor for realmente demo. O prefixo fx_test_ não garante um ambiente isolado. Nunca use uma conta real aqui. Não feche a página até concluir a verificação; os dados sensíveis ficam apenas na memória desta página.</p>
+<div class="grid"><div><label>Volume da ordem (lotes)</label><input id="volume" type="number" min="0.01" max="0.01" step="0.01" value="0.01" readonly></div><div><label>Ativo para ordem</label><input value="EURUSD" readonly></div></div><button id="buy" disabled>Comprar EURUSD · 0,01 lote</button><button id="sell" class="secondary" disabled>Vender EURUSD · 0,01 lote</button><p class="muted warning">As ordens só são liberadas depois de a FXAPIs confirmar explicitamente environment=demo e status=ready. Cada ordem exige toque manual e confirmação.</p><p class="muted warning">Importante: só continue se o servidor for realmente demo. O prefixo fx_test_ não garante um ambiente isolado. Nunca use uma conta real aqui. Não feche a página até concluir a verificação; os dados sensíveis ficam apenas na memória desta página.</p>
 </div>
 <script>
 const $=id=>document.getElementById(id);let accountId=null;
@@ -32,8 +32,8 @@ function show(x,kind=''){ $('status').className='status '+kind; $('status').text
 async function call(path,body){let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 $('f').addEventListener('submit',async e=>{e.preventDefault();$('connect').disabled=true;show('Cadastrando conta demo…');try{let j=await call('/api/connect',creds());accountId=j.accountId;show(j,'ok');$('warm').disabled=false;$('check').disabled=false;$('positions').disabled=false;$('password').value='';}catch(e){show(e.message,'err')}finally{$('connect').disabled=false}});
 $('warm').onclick=async()=>{try{show('Conectando a conta…');let j=await call('/api/warm',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
-$('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning')}catch(e){show(e.message,'err')}};
-$('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};
+$('check').onclick=async()=>{try{let j=await call('/api/status',creds());show(j,j.environment==='demo'?'ok':'warning');let verified=j.environment==='demo' && String(j.status||'').toLowerCase()==='ready';$('buy').disabled=!verified;$('sell').disabled=!verified;if(!verified)show({...j,warning:'Ordens bloqueadas: confirme environment=demo e status=ready.'},'warning')}catch(e){show(e.message,'err');$('buy').disabled=true;$('sell').disabled=true}};
+$('positions').onclick=async()=>{try{let j=await call('/api/positions',creds());show(j,'ok')}catch(e){show(e.message,'err')}};\nasync function order(side){if(!confirm('Confirmar '+(side==='buy'?'COMPRA':'VENDA')+' manual de EURUSD de 0,01 lote na conta DEMO?'))return;try{let j=await call('/api/order',{...creds(),side,volume:'0.01',instrument:'EURUSD'});show(j,'ok')}catch(e){show(e.message,'err')}}$('buy').onclick=()=>order('buy');$('sell').onclick=()=>order('sell');
 </script></main></body></html>
 """
 
@@ -128,3 +128,45 @@ def positions():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
+
+@app.post("/api/order")
+def place_order():
+    try:
+        d = request.get_json(force=True)
+        key = d.get("apiKey", "")
+        account_id = str(d.get("accountId") or "").strip()
+        side = str(d.get("side") or "").lower()
+        instrument = str(d.get("instrument") or "")
+        volume = str(d.get("volume") or "")
+        if not account_id:
+            return jsonify(error="Cadastre a conta e obtenha o ID primeiro."), 400
+        if side not in ("buy", "sell") or instrument != "EURUSD" or volume != "0.01":
+            return jsonify(error="Ordem bloqueada: somente buy/sell EURUSD com volume fixo 0.01."), 400
+        status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+        environment = str(status_data.get("environment", "")).lower()
+        connection_status = str(status_data.get("status", "")).lower()
+        if environment != "demo" or connection_status != "ready":
+            return jsonify(error="Ordem bloqueada: FXAPIs precisa confirmar environment=demo e status=ready.", environment=environment or None, status=connection_status or None), 409
+        import uuid
+        idem = str(uuid.uuid4())
+        r = requests.post(API + f"/accounts/{account_id}/orders/market",
+            headers={
+                "Authorization": "Bearer " + key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Idempotency-Key": idem
+            },
+            json={"instrument": instrument, "side": side, "volume": volume, "clientOrderId": idem},
+            timeout=30)
+        try:
+            result = r.json()
+        except Exception:
+            result = {"error": "FXAPIs retornou uma resposta não JSON.", "status": r.status_code}
+        if not r.ok:
+            err = result.get("error") or result.get("message") or result.get("code") or ("HTTP " + str(r.status_code))
+            return jsonify(error=str(err)), r.status_code if 400 <= r.status_code < 600 else 502
+        data = result.get("data", result)
+        return jsonify({"ok": True, "message": "Ordem enviada à FXAPIs na conta confirmada como demo.", "side": side, "instrument": instrument, "volume": volume, "idempotencyKey": idem, "result": data})
+    except Exception as e:
+        return jsonify(error=str(e)), 502
