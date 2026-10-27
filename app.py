@@ -18,7 +18,7 @@ PAGE = r"""
 <style>
 *{box-sizing:border-box}body{margin:0;background:#10131b;color:#f4f6fb;font:16px system-ui,sans-serif}.wrap{max-width:680px;margin:auto;padding:20px}.card{background:#1a2030;border:1px solid #303a50;border-radius:18px;padding:18px;margin:14px 0}h1{font-size:25px;margin:0 0 8px}.muted{color:#aab5c8;font-size:13px;line-height:1.5}.pill{display:inline-block;border-radius:99px;padding:6px 10px;background:#48391c;color:#ffdc8a;font-size:12px;font-weight:700}label{display:block;font-size:13px;color:#bac5d8;margin:14px 0 6px}input,select{width:100%;padding:13px;border:1px solid #3a4660;background:#0f1420;color:#fff;border-radius:10px;font-size:16px}button{border:0;border-radius:11px;padding:13px 15px;font-weight:750;font-size:15px;cursor:pointer;background:#6f8cff;color:#071020;width:100%;margin-top:14px}.secondary{background:#303a50;color:#fff}.status{white-space:pre-wrap;overflow-wrap:anywhere;background:#0e1420;border-radius:10px;padding:12px;margin-top:12px;font-size:13px}.warning{color:#ffdc8a}.ok{color:#82f0bd}.err{color:#ff9aab}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:460px){.grid{grid-template-columns:1fr}}
 </style></head><body><main class="wrap">
-<div class="card"><span class="pill">SOMENTE CONTA DEMO</span><h1>Conectar MetaTrader 5</h1><p class="muted">FXAPIs · EUR/USD · velas M15. A chave e a senha são enviadas ao backend por HTTPS e não são gravadas em arquivo nem no navegador. Se a conta já existir, use o botão de atualizar senha. Este painel não envia ordens de compra/venda.</p></div>
+<div class="card"><span class="pill">SOMENTE CONTA DEMO</span><h1>Conectar MetaTrader 5</h1><p class="muted">FXAPIs · EUR/USD. A automação demo de 2 minutos é opcional, usa volume fixo de 0,01 lote e pode perder dinheiro virtual. A chave e a senha são enviadas ao backend por HTTPS e não são gravadas em arquivo nem no navegador.</p></div>
 <div class="card"><form id="f">
 <label>Chave API FXAPIs (crie uma nova, com accounts:write)</label><input id="key" type="password" autocomplete="off" required placeholder="Cole sua chave FXAPIs nova">
 <div class="grid"><div><label>Login MT5</label><input id="login" value="5057942310" required></div><div><label>Servidor exato</label><input id="server" value="MetaQuotes-Demo" required></div></div>
@@ -263,7 +263,7 @@ def auto_strategy_worker(api_key, account_id):
                     AUTO_STATE["lastSignal"]={"side":side,"ema9":e9,"ema21":e21,"rsi":rsi,"at":datetime.now(timezone.utc).isoformat()}
                 if side:
                     order=req("POST",f"/accounts/{account_id}/orders/market",{"symbol":"EURUSD","side":side,"volume":"0.01"}, "auto_"+str(due))
-                    ticket=order.get("brokerPositionId") or order.get("brokerOrderId")
+                    ticket=order.get("brokerPositionId")
                     if not ticket: raise RuntimeError("Ordem sem ticket identificável; automação parada por segurança")
                     with AUTO_LOCK:
                         AUTO_STATE["opened"]={"ticket":str(ticket),"orderId":str(order.get("id") or due),"openedAt":time.time(),"side":side}
@@ -301,10 +301,19 @@ def auto_start():
 @app.post("/api/auto/stop")
 def auto_stop():
     global AUTO_STATE
-    with AUTO_LOCK:
-        AUTO_STATE["running"]=False
-        AUTO_STATE["message"]="Pedido para parar a automação recebido"
-    return jsonify(ok=True,message="Parada solicitada. Se houver posição aberta, verifique e feche-a manualmente pelo painel MT5/FXAPIs.",state=AUTO_STATE)
+    d=request.get_json(force=True); key=d.get("apiKey",""); account_id=str(d.get("accountId") or "").strip()
+    try:
+        with AUTO_LOCK:
+            opened=AUTO_STATE.get("opened")
+            AUTO_STATE["running"]=False
+        if opened and opened.get("ticket") and account_id and key:
+            fx_request("POST",f"/accounts/{account_id}/positions/{opened['ticket']}/close",key, {})
+            with AUTO_LOCK: AUTO_STATE["opened"]=None
+        with AUTO_LOCK: AUTO_STATE["message"]="Automação parada; posição da estratégia fechada se estava aberta."
+        return jsonify(ok=True,message="Automação parada. A posição gerenciada foi fechada se havia uma aberta.",state=AUTO_STATE)
+    except Exception as e:
+        with AUTO_LOCK: AUTO_STATE["message"]="Automação parada, mas confirme manualmente se a posição foi fechada: "+str(e)
+        return jsonify(ok=False,error="Automação parada; verifique a posição no MT5/FXAPIs para confirmar o fechamento.",state=AUTO_STATE),502
 
 @app.get("/api/auto/status")
 def auto_status():
