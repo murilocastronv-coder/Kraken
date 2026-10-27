@@ -137,6 +137,42 @@ def update_password():
     except Exception as e:
         return jsonify(error=str(e)), 502
 
+@app.post("/api/diagnose")
+def diagnose():
+    try:
+        d = request.get_json(force=True)
+        account_id = str(d.get("accountId") or "").strip()
+        key = d.get("apiKey", "")
+        if not account_id:
+            return jsonify(error="Informe o ID da conta FXAPIs."), 400
+        account = fx_request("GET", f"/accounts/{account_id}", key)
+        status_data = fx_request("GET", f"/accounts/{account_id}/status", key)
+        problem = account.get("problem") or status_data.get("problem") or {}
+        return jsonify({"ok": True, "accountId": account_id, "login": account.get("login"),
+            "server": account.get("server"), "environment": account.get("environment"),
+            "state": status_data.get("state") or account.get("state"),
+            "detail": status_data.get("detail") or status_data.get("stateDetail"),
+            "problem": problem, "suggestedServers": problem.get("otherServers") or [],
+            "nextStep": "Use apenas um servidor alternativo explicitamente sugerido pela FXAPIs."})
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+
+@app.post("/api/server")
+def change_server():
+    try:
+        d = request.get_json(force=True)
+        account_id = str(d.get("accountId") or "").strip()
+        server = str(d.get("newServer") or "").strip()
+        if not account_id or not server:
+            return jsonify(error="Informe ID da conta e servidor alternativo."), 400
+        if "demo" not in server.lower():
+            return jsonify(error="Bloqueado: este painel aceita somente servidores demo."), 400
+        data = fx_request("POST", f"/accounts/{account_id}/server", d.get("apiKey", ""),
+                          {"server": server, "connect": False})
+        return jsonify({"ok": True, "message": "Servidor atualizado sem iniciar login automaticamente.", "result": data})
+    except Exception as e:
+        return jsonify(error=str(e)), 502
+
 @app.post("/api/warm")
 def warm():
     return account_action("warm")
